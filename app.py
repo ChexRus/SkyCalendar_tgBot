@@ -191,43 +191,46 @@ application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
 
 # ======================
-# Инициализация Application (обязательно для новых версий PTB)
-# ======================
-
-async def init_app():
-    await application.initialize()
-    await application.start()
-    logger.info("Application initialized and started successfully")
-
-# Запуск инициализации при загрузке модуля
-import asyncio
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(init_app())
-loop.close()
-
-# ======================
 # Flask роуты (все синхронные — совместимы с Gunicorn)
 # ======================
 
 @app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
 def webhook():
+    """Обработчик вебхука"""
     if request.headers.get("content-type") != "application/json":
         abort(403)
+    
     json_data = request.get_json(force=True)
+    
+    # Создаем update
     update = Update.de_json(json_data, application.bot)
-
-    # Обработка обновления в отдельном event loop
+    
+    # Обрабатываем update через application
+    import asyncio
+    
+    async def process_update():
+        try:
+            # Используем application для обработки update
+            await application.initialize()
+            await application.process_update(update)
+        except Exception as e:
+            logger.error(f"Error processing update: {e}")
+        finally:
+            await application.shutdown()
+    
+    # Запускаем в event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(application.process_update(update))
+        loop.run_until_complete(process_update())
     finally:
         loop.close()
+    
     return "OK", 200
 
 # Установка webhook вручную
 async def _set_webhook_async():
+    """Асинхронная установка вебхука"""
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     try:
         await application.bot.set_webhook(url=url)
@@ -239,13 +242,17 @@ async def _set_webhook_async():
 
 @app.route("/set-webhook")
 def set_webhook():
+    """Установка вебхука"""
+    import asyncio
+    
+    # Создаем новую event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(_set_webhook_async())
+        return result
     finally:
         loop.close()
-    return result
 
 # Главная страница
 @app.route("/")
@@ -262,6 +269,26 @@ def index():
     <hr>
     <p>Готово? Пиши боту @skicalendar_bot команду /start 🚀</p>
     """
+
+# Глобальная инициализация при старте
+@app.before_first_request
+def initialize_bot():
+    """Инициализация бота при первом запросе"""
+    import asyncio
+    
+    async def init():
+        try:
+            await application.initialize()
+            logger.info("Bot application initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize bot: {e}")
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(init())
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     # Для локального теста
