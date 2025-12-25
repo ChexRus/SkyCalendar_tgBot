@@ -8,8 +8,8 @@ import psycopg
 from psycopg.rows import dict_row
 import time
 
-# === Настройки из Environment Variables на Render ===
-BOT_TOKEN = os.environ['BOT_TOKEN']
+# === Настройки из Environment Variables ===
+BOT_TOKEN = os.environ['BOT_TOKEN']  # Ваш токен в Render
 WEATHER_API_KEY = os.environ['WEATHER_API_KEY']
 DATABASE_URL = os.environ['DATABASE_URL']
 
@@ -108,7 +108,7 @@ def save_location(message):
     conn.close()
     bot.send_message(message.chat.id, "Локация сохранена! Теперь можно отмечать пробежки 🎉", reply_markup=main_menu())
 
-# === Webhook ===
+# === Webhook для Telegram ===
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
     json_string = request.get_data(as_text=True)
