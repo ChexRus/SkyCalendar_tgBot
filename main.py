@@ -77,20 +77,9 @@ def get_weather(lat, lon):
 # === Обработчики бота ===
 @bot.message_handler(commands=['start'])
 def start(message):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT location FROM users WHERE telegram_id = %s", (message.from_user.id,))
-    user = cur.fetchone()
-    conn.close()
-    if user:
-        bot.send_message(message.chat.id, "С возвращением, лыжник! ❄️🏃‍♂️\nЧто будем делать?", reply_markup=main_menu())
-    else:
-        bot.send_message(message.chat.id,
-                         "Привет! Это бот-календарь лыжных и беговых тренировок 🎿\n\n"
-                         "Чтобы показывать погоду в день пробежки — поделись своей локацией 📍",
-                         reply_markup=types.ReplyKeyboardRemove())
-        bot.register_next_step_handler(message, save_location)
-
+    print(f"Получена команда /start от пользователя {message.from_user.id} ({message.from_user.username})")
+    bot.send_message(message.chat.id, "Привет! Бот работает и видит твоё сообщение! 🎉\n\nТеперь отмечай пробежки.", reply_markup=main_menu())
+    
 def save_location(message):
     if not message.location:
         bot.send_message(message.chat.id, "Пожалуйста, отправь локацию через скрепку 📎 → Локация")
