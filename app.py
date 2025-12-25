@@ -195,12 +195,19 @@ application.add_handler(conv_handler)
 # ======================
 
 @app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
-async def webhook():
+def webhook():
     if request.headers.get("content-type") != "application/json":
         abort(403)
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, application.bot)
-    await application.process_update(update)
+    
+    import asyncio
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(application.process_update(update))
+    finally:
+        pass  # не закрываем loop
     return "OK", 200
 
 # Внутренняя асинхронная функция установки webhook
