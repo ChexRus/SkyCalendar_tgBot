@@ -185,39 +185,26 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
 
-# Flask роуты для webhooks
-@app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
-async def webhook():
-    if request.headers.get("content-type") != "application/json":
-        abort(403)
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, application.bot)
-    await application.process_update(update)
-    return "OK", 200
-
-@app.route("/")
-def index():
-    return "Бот работает! 🏂"
-
-# Функция установки webhook (теперь ручная, через браузер)
+# Функция установки webhook
 async def set_webhook():
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     await application.bot.set_webhook(url=url)
     logger.info(f"Webhook установлен: {url}")
     return "Webhook установлен успешно!"
 
-# Роут для ручной установки webhook (зайди по этому адресу один раз после деплоя)
+# Роут для ручной установки webhook
 @app.route("/set-webhook")
 async def manual_set_webhook():
     return await set_webhook()
 
-# Главная страница
+# Главная страница 
 @app.route("/")
 def index():
-    return "Бот работает! 🏂<br><a href='/set-webhook'>Установить webhook (один раз)</a>"
+    return "Бот работает! 🏂<br><br><a href='/set-webhook'>Нажми сюда, чтобы установить webhook (один раз после деплоя)</a>"
 
 if __name__ == "__main__":
     # Для локального теста
     import asyncio
     asyncio.run(set_webhook())
     app.run(host="0.0.0.0", port=5000)
+
