@@ -3,6 +3,7 @@ import logging
 import os
 from collections import defaultdict
 import requests
+import asyncio
 from flask import Flask, request, abort
 from telegram import (
     Update,
@@ -25,7 +26,7 @@ from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 # Состояния диалога
 SELECT_DATE, INPUT_KM, SELECT_TIME = range(3)
 
-# Хранение данных в памяти
+# Хранение данных в памяти (для продакшена рекомендуется Redis или БД)
 user_data_storage = defaultdict(list)  # user_id -> list[dict]
 user_locations = {}  # user_id -> (lat, lon)
 
@@ -177,14 +178,12 @@ application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
 
 # ======================
-# Инициализация Application
+# Инициализация Application (только initialize — достаточно для webhook)
 # ======================
 async def _initialize_app():
     await application.initialize()
-    await application.start()
-    logger.info("Application initialized and started")
+    logger.info("Application initialized (webhook mode)")
 
-import asyncio
 asyncio.run(_initialize_app())
 
 # ======================
@@ -199,25 +198,27 @@ def webhook():
     application.update_queue.put_nowait(update)
     return "OK", 200
 
-# Асинхронный роут для установки webhook
 @app.route("/set-webhook")
-async def set_webhook():
+def set_webhook():
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        await application.bot.set_webhook(url=url)
+        loop.run_until_complete(application.bot.set_webhook(url=url))
         logger.info(f"Webhook установлен: {url}")
-        return "Webhook установлен успешно! ✅"
+        return "Webhook установлен успешно! ✅ Теперь бот работает."
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка установки webhook: {e}")
         return f"Ошибка: {str(e)}"
+    finally:
+        loop.close()
 
-# Главная страница
 @app.route("/")
 def index():
     return """
-    <h2 style="color: #0088cc;">🏂 SkiCalendarBot — всё готово!</h2>
-    <p>Бот работает на Render.com и отвечает на сообщения.</p>
-    <p>После деплоя/обновления нажми кнопку один раз:</p>
+    <h2 style="color: #0088cc;">🏂 SkiCalendarBot — готов!</h2>
+    <p>Бот работает на Render.com</p>
+    <p>После деплоя или обновления кода нажмите кнопку один раз:</p>
     <a href="/set-webhook">
         <button style="font-size:20px; padding:15px 30px; background:#00aa00; color:white; border:none; border-radius:10px; cursor:pointer;">
             Установить webhook
