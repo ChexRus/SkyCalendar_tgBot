@@ -13,7 +13,7 @@ WEATHER_API_KEY = os.environ['WEATHER_API_KEY']
 DATABASE_URL = os.environ['DATABASE_URL']
 
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+app = Flask(__name__)  # Исправлено: __name__
 
 # === Подключение к БД ===
 def get_db_connection():
@@ -79,12 +79,14 @@ def get_weather(lat, lon):
             return f"{desc}, {temp}°C"
         else:
             return "Не удалось получить погоду"
-    except:
+    except Exception as e:
+        print(f"Ошибка погоды: {e}")
         return "Ошибка связи с сервисом погоды"
 
 # === Обработчики бота ===
 @bot.message_handler(commands=['start'])
 def start(message):
+    print(f"Получена команда /start от {message.from_user.id}")
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT location FROM users WHERE telegram_id = %s", (message.from_user.id,))
@@ -169,9 +171,16 @@ def save_run(message, run_date, time_range, distance):
     cur = conn.cursor()
     cur.execute("SELECT location FROM users WHERE telegram_id = %s", (message.from_user.id,))
     loc_row = cur.fetchone()
-    lat, lon = loc_row['location'].split(',')
-    weather = get_weather(lat, lon) if run_date == date.today() else "Историческая погода недоступна"
+    conn.close()
 
+    if loc_row:
+        lat, lon = loc_row['location'].split(',')
+        weather = get_weather(lat, lon) if run_date == date.today() else "Историческая погода недоступна"
+    else:
+        weather = "Локация не сохранена"
+
+    conn = get_db_connection()
+    cur = conn.cursor()
     cur.execute("""
         INSERT INTO runs (telegram_id, run_date, time_range, distance, comment)
         VALUES (%s, %s, %s, %s, %s)
@@ -225,15 +234,18 @@ def change_loc(message):
     bot.send_message(message.chat.id, "Отправь новую локацию 📍", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(message, save_location)
 
-# === Webhook — обрабатываем и корень, и путь с токеном ===
+# === Webhook ===
 @app.route('/', methods=['GET', 'POST'])
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
     if request.method == 'POST':
-        if request.headers.get('content-type') == 'application/json':
+        content_type = request.headers.get('content-type', '')
+        if content_type.startswith('application/json'):
             json_string = request.get_data(as_text=True)
             update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
+            if update:
+                print(f"Получено обновление: {update.update_id} от {update.message.from_user.id if update.message else 'unknown'}")
+                bot.process_new_updates([update])
             return '', 200
         else:
             abort(403)
@@ -241,13 +253,13 @@ def webhook():
         return "Бот работает! 🎿", 200
 
 # === Запуск на Render ===
-if __name__ == '__main__':
+if __name__ == '__main__':  # Исправлено: __name__ и __main__
     import time
+    print("Удаляем старый webhook...")
     bot.remove_webhook()
     time.sleep(2)
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/"
+    print(f"Устанавливаем webhook на: {webhook_url}")
     bot.set_webhook(url=webhook_url)
-    print(f"Webhook успешно установлен на: {webhook_url}")
-
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
