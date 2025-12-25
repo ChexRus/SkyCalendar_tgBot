@@ -1,9 +1,10 @@
+import os
 import datetime
 import logging
-import os
 from collections import defaultdict
 
 import httpx
+from flask import Flask, request, abort
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -27,15 +28,22 @@ from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 # ======================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+WEBHOOK_SECRET = BOT_TOKEN  # используем токен как путь
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+PORT = int(os.environ.get("PORT", 5000))
+HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ======================
-# Состояния диалога
+# Flask
+# ======================
+
+app = Flask(__name__)
+
+# ======================
+# Telegram состояния
 # ======================
 
 SELECT_DATE, INPUT_KM, SELECT_TIME = range(3)
@@ -44,17 +52,17 @@ SELECT_DATE, INPUT_KM, SELECT_TIME = range(3)
 # Хранилище (in-memory)
 # ======================
 
-user_data_storage = defaultdict(list)  # user_id -> list[dict]
-user_locations = {}  # user_id -> (lat, lon)
+user_trainings = defaultdict(list)
+user_locations = {}
 
 # ======================
 # Вспомогательные функции
 # ======================
 
-def main_menu_markup() -> InlineKeyboardMarkup:
+def main_menu():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Добавить тренировку", callback_data="add_training")],
+            [InlineKeyboardButton("Добавить тренировку", callback_data="add")],
             [InlineKeyboardButton("Статистика", callback_data="stats")],
         ]
     )
@@ -62,15 +70,15 @@ def main_menu_markup() -> InlineKeyboardMarkup:
 
 async def get_temperature(lat: float, lon: float) -> float | None:
     try:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "current": "temperature_2m",
-        }
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
+            r = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "current": "temperature_2m",
+                },
+            )
             return r.json()["current"]["temperature_2m"]
     except Exception as e:
         logger.error(f"Temperature error: {e}")
@@ -81,24 +89,20 @@ async def get_temperature(lat: float, lon: float) -> float | None:
 # ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    location_keyboard = ReplyKeyboardMarkup(
+    location_kb = ReplyKeyboardMarkup(
         [[KeyboardButton("Поделиться локацией", request_location=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
     await update.message.reply_text(
-        "Привет! Я SkiCalendarBot ❄️\n"
-        "Поделись локацией, чтобы я показывал температуру во время тренировок:",
-        reply_markup=location_keyboard,
+        "Привет! ❄️\nПоделись локацией для отображения температуры.",
+        reply_markup=location_kb,
     )
-    await update.message.reply_text(
-        "Выбери действие:",
-        reply_markup=main_menu_markup(),
-    )
+    await update.message.reply_text("Выбери действие:", reply_markup=main_menu())
 
 
-async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def save_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_locations[update.effective_user.id] = (
         update.message.location.latitude,
         update.message.location.longitude,
@@ -106,16 +110,16 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Локация сохранена 🌡️")
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "add_training":
+    if query.data == "add":
         calendar, step = DetailedTelegramCalendar(
             min_date=datetime.date(2020, 1, 1)
         ).build()
         await query.edit_message_text(
-            f"Выбери дату: {LSTEP[step]}",
+            f"Выбери дату ({LSTEP[step]}):",
             reply_markup=calendar,
         )
         return SELECT_DATE
@@ -126,22 +130,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("time_"):
         time_map = {
-            "time_morning": "Утро (8–12)",
-            "time_day": "День (12–15)",
-            "time_evening": "Вечер (15–18)",
-            "time_night": "Ночь (18–22)",
+            "time_morning": "Утро",
+            "time_day": "День",
+            "time_evening": "Вечер",
+            "time_night": "Ночь",
         }
 
         user_id = query.from_user.id
-        time_slot = time_map[query.data]
         date = context.user_data["date"]
         km = context.user_data["km"]
+        time_slot = time_map[query.data]
 
         temp = None
         if user_id in user_locations:
             temp = await get_temperature(*user_locations[user_id])
 
-        user_data_storage[user_id].append(
+        user_trainings[user_id].append(
             {
                 "date": date,
                 "km": km,
@@ -150,10 +154,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         )
 
-        temp_text = f" ({temp}°C)" if temp is not None else ""
+        t = f" ({temp}°C)" if temp is not None else ""
         await query.edit_message_text(
-            f"Записал: {date} — {km} км, {time_slot}{temp_text} ✅",
-            reply_markup=main_menu_markup(),
+            f"Записано: {date} — {km} км, {time_slot}{t} ✅",
+            reply_markup=main_menu(),
         )
         return ConversationHandler.END
 
@@ -166,15 +170,13 @@ async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not result:
         await query.edit_message_text(
-            f"Выбери {LSTEP[step]}",
+            f"Выбери {LSTEP[step]}:",
             reply_markup=keyboard,
         )
         return SELECT_DATE
 
     context.user_data["date"] = result
-    await query.edit_message_text(
-        f"Дата: {result}\nВведи километры:"
-    )
+    await query.edit_message_text("Введи километры:")
     return INPUT_KM
 
 
@@ -189,7 +191,7 @@ async def input_km(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["km"] = km
 
-    keyboard = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Утро", callback_data="time_morning")],
             [InlineKeyboardButton("День", callback_data="time_day")],
@@ -198,16 +200,13 @@ async def input_km(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     )
 
-    await update.message.reply_text(
-        "Когда была тренировка?",
-        reply_markup=keyboard,
-    )
+    await update.message.reply_text("Когда была тренировка?", reply_markup=kb)
     return SELECT_TIME
 
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    data = user_data_storage[user_id]
+    data = user_trainings[user_id]
 
     if not data:
         text = "Пока нет тренировок."
@@ -215,7 +214,6 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = sum(t["km"] for t in data)
         month_start = datetime.date.today().replace(day=1)
         month = sum(t["km"] for t in data if t["date"] >= month_start)
-
         text = (
             f"📊 Статистика\n"
             f"Всего: {total:.1f} км\n"
@@ -224,34 +222,65 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=main_menu_markup())
+        await update.callback_query.edit_message_text(text, reply_markup=main_menu())
     else:
-        await update.message.reply_text(text, reply_markup=main_menu_markup())
+        await update.message.reply_text(text, reply_markup=main_menu())
+
+# ======================
+# Telegram Application
+# ======================
+
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(menu_handler)],
+    states={
+        SELECT_DATE: [CallbackQueryHandler(calendar_handler)],
+        INPUT_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_km)],
+        SELECT_TIME: [CallbackQueryHandler(menu_handler, pattern="^time_")],
+    },
+    fallbacks=[],
+)
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.LOCATION, save_location))
+telegram_app.add_handler(conv)
+
+# ======================
+# Webhook
+# ======================
+
+@app.route(f"/{WEBHOOK_SECRET}", methods=["POST"])
+async def telegram_webhook():
+    if request.headers.get("content-type") != "application/json":
+        abort(403)
+
+    update = Update.de_json(request.json, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "OK", 200
+
+
+@app.route("/health")
+def health():
+    return {"status": "ok"}, 200
 
 # ======================
 # Запуск
 # ======================
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(add_training|stats)$")],
-        states={
-            SELECT_DATE: [CallbackQueryHandler(calendar_handler)],
-            INPUT_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_km)],
-            SELECT_TIME: [CallbackQueryHandler(button_handler, pattern="^time_")],
-        },
-        fallbacks=[],
+@app.before_serving
+async def startup():
+    await telegram_app.initialize()
+    await telegram_app.bot.set_webhook(
+        url=f"https://{HOSTNAME}/{WEBHOOK_SECRET}"
     )
+    logger.info("Webhook установлен")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.LOCATION, location_handler))
-    app.add_handler(conv)
 
-    app.run_polling()
+@app.after_serving
+async def shutdown():
+    await telegram_app.shutdown()
 
 
 if __name__ == "__main__":
-    main()
-
+    app.run(host="0.0.0.0", port=PORT)
