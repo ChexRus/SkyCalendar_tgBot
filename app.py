@@ -1,6 +1,7 @@
 import datetime
 import logging
 import os
+import asyncio
 from collections import defaultdict
 
 import requests
@@ -36,8 +37,10 @@ app = Flask(__name__)
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Основной объект бота
-application = Application.builder().token(os.environ["BOT_TOKEN"]).build()
+# Глобальные переменные для управления состоянием бота
+application = None
+application_lock = asyncio.Lock()
+is_initialized = False
 
 # ======================
 # Обработчики бота
@@ -174,24 +177,69 @@ def main_menu_markup():
         [InlineKeyboardButton("Статистика", callback_data="stats")],
     ])
 
-# Регистрация хендлеров
-conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(button_handler, pattern="^(add_training|stats)$")],
-    states={
-        SELECT_DATE: [CallbackQueryHandler(calendar_handler)],
-        INPUT_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_km)],
-        SELECT_TIME: [CallbackQueryHandler(button_handler, pattern="^time_")],
-    },
-    fallbacks=[],
-    allow_reentry=True,
-)
+# ======================
+# Инициализация бота
+# ======================
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.LOCATION, location_handler))
-application.add_handler(conv_handler)
+def init_bot():
+    """Инициализация бота (синхронная функция)"""
+    global application, is_initialized
+    
+    if is_initialized:
+        return application
+    
+    # Создаем Application
+    application = Application.builder().token(os.environ["BOT_TOKEN"]).build()
+    
+    # Регистрация хендлеров
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern="^(add_training|stats)$")],
+        states={
+            SELECT_DATE: [CallbackQueryHandler(calendar_handler)],
+            INPUT_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_km)],
+            SELECT_TIME: [CallbackQueryHandler(button_handler, pattern="^time_")],
+        },
+        fallbacks=[],
+        allow_reentry=True,
+    )
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.LOCATION, location_handler))
+    application.add_handler(conv_handler)
+    
+    is_initialized = True
+    logger.info("Bot application initialized successfully")
+    
+    return application
+
+async def process_update_async(update: Update):
+    """Асинхронная обработка обновления"""
+    global application, is_initialized, application_lock
+    
+    async with application_lock:
+        if not is_initialized:
+            init_bot()
+        
+        if not application:
+            logger.error("Application not initialized")
+            return
+        
+        try:
+            # Инициализируем application если еще не инициализирован
+            if not hasattr(application, '_initialized') or not application._initialized:
+                await application.initialize()
+                logger.info("Application initialized for processing update")
+            
+            # Обрабатываем обновление
+            await application.process_update(update)
+            logger.info(f"Update processed: {update.update_id}")
+            
+        except Exception as e:
+            logger.error(f"Error processing update: {e}")
+            raise
 
 # ======================
-# Flask роуты (все синхронные — совместимы с Gunicorn)
+# Flask роуты
 # ======================
 
 @app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
@@ -203,39 +251,31 @@ def webhook():
     json_data = request.get_json(force=True)
     
     # Создаем update
-    update = Update.de_json(json_data, application.bot)
+    update = Update.de_json(json_data, init_bot().bot)
     
-    # Обрабатываем update через application
-    import asyncio
-    
-    async def process_update():
-        try:
-            # Используем application для обработки update
-            await application.initialize()
-            await application.process_update(update)
-        except Exception as e:
-            logger.error(f"Error processing update: {e}")
-        finally:
-            await application.shutdown()
-    
-    # Запускаем в event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(process_update())
-    finally:
+        # Обрабатываем update в новом event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(process_update_async(update))
         loop.close()
+        
+    except Exception as e:
+        logger.error(f"Failed to process update: {e}")
+        return "Internal Server Error", 500
     
     return "OK", 200
 
 # Установка webhook вручную
 async def _set_webhook_async():
     """Асинхронная установка вебхука"""
+    init_bot()  # Инициализируем бота
+    
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     try:
         await application.bot.set_webhook(url=url)
         logger.info(f"Webhook успешно установлен: {url}")
-        return "Webhook установлен успешно! ✅ Теперь бот полностью работает."
+        return f"Webhook установлен успешно! ✅<br>URL: {url}<br><br>Теперь бот полностью работает."
     except Exception as e:
         logger.error(f"Ошибка установки webhook: {e}")
         return f"Ошибка: {str(e)}"
@@ -243,53 +283,138 @@ async def _set_webhook_async():
 @app.route("/set-webhook")
 def set_webhook():
     """Установка вебхука"""
-    import asyncio
-    
-    # Создаем новую event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         result = loop.run_until_complete(_set_webhook_async())
-        return result
-    finally:
         loop.close()
+        return result
+    except Exception as e:
+        return f"Ошибка: {str(e)}"
+
+@app.route("/health")
+def health():
+    """Проверка здоровья приложения"""
+    return "OK", 200
 
 # Главная страница
 @app.route("/")
 def index():
-    return """
-    <h2 style="color: #0088cc;">🏂 SkiCalendarBot — всё готово!</h2>
-    <p>Бот работает на Render.com и отвечает на сообщения.</p>
-    <p>После обновления кода нажми кнопку один раз:</p>
-    <a href="/set-webhook">
-        <button style="font-size:20px; padding:15px 30px; background:#00aa00; color:white; border:none; border-radius:10px; cursor:pointer;">
-            Установить webhook
-        </button>
-    </a>
-    <hr>
-    <p>Готово? Пиши боту @skicalendar_bot команду /start 🚀</p>
+    hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost:5000')
+    webhook_url = f"https://{hostname}/{os.environ['BOT_TOKEN']}"
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🏂 SkiCalendarBot</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                min-height: 100vh;
+            }}
+            .container {{
+                background: rgba(255, 255, 255, 0.1);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            }}
+            h1 {{
+                text-align: center;
+                margin-bottom: 30px;
+                font-size: 2.5em;
+            }}
+            .status {{
+                background: rgba(255, 255, 255, 0.2);
+                padding: 15px;
+                border-radius: 10px;
+                margin: 20px 0;
+            }}
+            .button {{
+                display: inline-block;
+                background: #00aa00;
+                color: white;
+                padding: 15px 30px;
+                text-decoration: none;
+                border-radius: 10px;
+                font-size: 20px;
+                font-weight: bold;
+                margin: 10px 0;
+                transition: all 0.3s;
+                border: none;
+                cursor: pointer;
+            }}
+            .button:hover {{
+                background: #00cc00;
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0, 170, 0, 0.4);
+            }}
+            .info {{
+                background: rgba(255, 255, 255, 0.1);
+                padding: 20px;
+                border-radius: 10px;
+                margin: 20px 0;
+                font-family: monospace;
+                word-break: break-all;
+            }}
+            .step {{
+                margin: 25px 0;
+                padding-left: 20px;
+                border-left: 3px solid #00aa00;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🏂 SkiCalendarBot — всё готово!</h1>
+            
+            <div class="status">
+                <p>✅ Бот запущен и готов к работе</p>
+                <p>📍 Текущий сервер: {hostname}</p>
+                <p>🤖 Токен бота: ••••••••••{os.environ['BOT_TOKEN'][-10:]}</p>
+            </div>
+            
+            <div class="step">
+                <h3>📝 Шаг 1: Установите webhook</h3>
+                <p>Нажмите кнопку ниже для установки webhook:</p>
+                <a href="/set-webhook" class="button">Установить webhook</a>
+            </div>
+            
+            <div class="step">
+                <h3>🔗 Шаг 2: Проверьте webhook URL</h3>
+                <p>Ваш webhook URL:</p>
+                <div class="info">{webhook_url}</div>
+                <p>Для проверки можно использовать <a href="https://api.telegram.org/bot{os.environ['BOT_TOKEN']}/getWebhookInfo" style="color: #00ff00;">getWebhookInfo</a></p>
+            </div>
+            
+            <div class="step">
+                <h3>🚀 Шаг 3: Начните работу с ботом</h3>
+                <p>Перейдите в Telegram и напишите боту команду:</p>
+                <div class="info">/start</div>
+            </div>
+            
+            <div class="step">
+                <h3>🛠 Техническая информация</h3>
+                <p><a href="/health" style="color: #00ff00;">Проверить здоровье приложения</a></p>
+                <p><small>Приложение работает на Render.com с использованием Flask + python-telegram-bot</small></p>
+            </div>
+        </div>
+    </body>
+    </html>
     """
 
-# Глобальная инициализация при старте
-@app.before_first_request
-def initialize_bot():
-    """Инициализация бота при первом запросе"""
-    import asyncio
-    
-    async def init():
-        try:
-            await application.initialize()
-            logger.info("Bot application initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize bot: {e}")
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(init())
-    finally:
-        loop.close()
+# Инициализируем бота при импорте
+init_bot()
+logger.info("SkiCalendarBot initialized successfully")
 
 if __name__ == "__main__":
     # Для локального теста
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=True)
