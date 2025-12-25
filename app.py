@@ -185,26 +185,32 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
 
-# Функция установки webhook
-async def set_webhook():
+# Функция установки webhook (остаётся async, но будем вызывать правильно)
+async def _set_webhook_async():
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     await application.bot.set_webhook(url=url)
     logger.info(f"Webhook установлен: {url}")
     return "Webhook установлен успешно!"
 
-# Роут для ручной установки webhook
+# Синхронный роут для установки webhook (работает с Gunicorn)
 @app.route("/set-webhook")
-async def manual_set_webhook():
-    return await set_webhook()
+def set_webhook():
+    import asyncio
+    loop = asyncio.new_event_loop()
+    result = loop.run_until_complete(_set_webhook_async())
+    loop.close()
+    return result
 
-# Главная страница 
+# Главная страница
 @app.route("/")
 def index():
-    return "Бот работает! 🏂<br><br><a href='/set-webhook'>Нажми сюда, чтобы установить webhook (один раз после деплоя)</a>"
-
-if __name__ == "__main__":
-    # Для локального теста
-    import asyncio
-    asyncio.run(set_webhook())
-    app.run(host="0.0.0.0", port=5000)
+    return """
+    <h2>Бот работает! 🏂</h2>
+    <p>Нажми кнопку ниже, чтобы установить webhook (нужно сделать один раз после каждого деплоя):</p>
+    <a href="/set-webhook">
+        <button style="font-size:18px; padding:15px; background:#0088cc; color:white; border:none; border-radius:8px; cursor:pointer;">
+            Установить webhook
+        </button>
+    </a>
+    """
 
