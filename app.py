@@ -1,25 +1,40 @@
-from flask import Flask, request
-from bot import ApplicationBuilder, start, calendar_command, calendar_callback
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from db import create_pool, add_user
 
-import os
+import config
 
-TOKEN = os.environ.get("BOT_TOKEN")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await add_user(context.bot_data['pool'], user.id, user.username)
+    
+    keyboard = [
+        [InlineKeyboardButton("Привет 🌟", callback_data="hello")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Привет! Я твой SkyCalendar Bot.", reply_markup=reply_markup)
 
-app = Flask(__name__)
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(text=f"Вы нажали: {query.data}")
 
-application = ApplicationBuilder().token(TOKEN).build()
+async def main():
+    app = ApplicationBuilder().token(config.TOKEN).build()
+    
+    # Подключаем базу данных
+    pool = await create_pool()
+    app.bot_data['pool'] = pool
 
-# Регистрируем хэндлеры
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("calendar", calendar_command))
-application.add_handler(CallbackQueryHandler(calendar_callback))
+    # Хэндлеры
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button))
+    
+    # Запуск бота
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = request.get_json(force=True)
-    application.update_queue.put(update)
-    return "OK"
-
-@app.route("/")
-def index():
-    return "Bot is running"
+if __name__ == "__main__":
+    asyncio.run(main())
