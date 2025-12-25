@@ -74,11 +74,9 @@ def get_weather(lat, lon):
         print(f"Ошибка погоды: {e}")
         return "Ошибка связи с сервисом погоды"
 
-# === Обработчики бота ===
 @bot.message_handler(commands=['start'])
 def start(message):
-    print(f"Получена команда /start от пользователя {message.from_user.id} ({message.from_user.username})")
-    bot.send_message(message.chat.id, "Привет! Бот работает и видит твоё сообщение! 🎉\n\nТеперь отмечай пробежки.", reply_markup=main_menu())
+    bot.send_message(message.chat.id, "Привет! Бот работает!", reply_markup=main_menu())
     
 def save_location(message):
     if not message.location:
