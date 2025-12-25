@@ -21,21 +21,23 @@ from telegram.ext import (
     filters,
 )
 from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
-import asyncio
-import threading
-import aiohttp
 
 # Состояния диалога
 SELECT_DATE, INPUT_KM, SELECT_TIME = range(3)
-# Хранение данных в памяти
-user_data_storage = defaultdict(list) # user_id -> list[dict]
-user_locations = {} # user_id -> (lat, lon)
+
+# Хранение данных в памяти (для production лучше Redis/БД)
+user_data_storage = defaultdict(list)  # user_id -> list[dict]
+user_locations = {}  # user_id -> (lat, lon)
+
 app = Flask(__name__)
+
 # Логирование
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 # Основной объект бота
 application = Application.builder().token(os.environ["BOT_TOKEN"]).build()
+
 # ======================
 # Обработчики бота
 # ======================
@@ -52,24 +54,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
     )
     await update.message.reply_text("Выбери действие:", reply_markup=main_markup)
+
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lat = update.message.location.latitude
     lon = update.message.location.longitude
     user_locations[user_id] = (lat, lon)
     await update.message.reply_text("Локация сохранена! Теперь буду показывать температуру 🌡️")
+
 async def get_temperature(lat: float, lon: float) -> float | None:
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
-                data = await response.json()
-                return data["current"]["temperature_2m"]
+        response = requests.get(url, timeout=10).json()
+        return response["current"]["temperature_2m"]
     except Exception as e:
         logger.error(f"Error getting temperature: {e}")
         return None
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -107,6 +108,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_markup(),
         )
         return ConversationHandler.END
+
 async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     result, key, step = DetailedTelegramCalendar(min_date=datetime.date(2020, 1, 1)).process(query.data)
@@ -116,6 +118,7 @@ async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_date"] = result
         await query.edit_message_text(f"Выбрана дата: {result}\nВведи пройденные километры (например, 15.5):")
         return INPUT_KM
+
 async def input_km(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         km = float(update.message.text.replace(",", "."))
@@ -133,6 +136,7 @@ async def input_km(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("Когда была тренировка? Выбери время:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_TIME
+
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.callback_query else update.message.from_user.id
     trainings = user_data_storage[user_id]
@@ -149,11 +153,13 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
     else:
         await update.message.reply_text(text, reply_markup=reply_markup)
+
 def main_menu_markup():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Добавить тренировку", callback_data="add_training")],
         [InlineKeyboardButton("Статистика", callback_data="stats")],
     ])
+
 # Регистрация хендлеров
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(button_handler, pattern="^(add_training|stats)$")],
@@ -165,32 +171,31 @@ conv_handler = ConversationHandler(
     fallbacks=[],
     allow_reentry=True,
 )
+
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
+
 # ======================
-# Инициализация Application в отдельном потоке с постоянным loop
+# Инициализация Application при запуске (до форка workers в Gunicorn)
 # ======================
-loop = asyncio.new_event_loop()
+async def _initialize_app():
+    await application.initialize()
+    await application.start()
+    logger.info("Application initialized and started")
 
-def start_loop():
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
+# Запуск инициализации синхронно (в главном процессе)
+import asyncio
+asyncio.run(_initialize_app())
 
-threading.Thread(target=start_loop, daemon=True).start()
+# Опционально: остановка при shutdown
+import atexit
+async def _stop_app():
+    await application.stop()
+atexit.register(lambda: asyncio.run(_stop_app()))
 
-def init_application():
-    async def inner():
-        await application.initialize()
-        await application.start()
-        logger.info("Application initialized and started successfully")
-
-    future = asyncio.run_coroutine_threadsafe(inner(), loop)
-    future.result()  # Блокирует до завершения инициализации
-
-init_application()
 # ======================
-# Flask роуты (все синхронные — совместимы с Gunicorn)
+# Flask роуты
 # ======================
 @app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
 def webhook():
@@ -198,40 +203,41 @@ def webhook():
         abort(403)
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, application.bot)
-    asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+    # Просто кладём в очередь (не await — синхронный контекст)
+    application.update_queue.put_nowait(update)
     return "OK", 200
+
 # Установка webhook вручную
-async def _set_webhook_async():
-    url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
-    try:
-        await application.bot.set_webhook(url=url)
-        logger.info(f"Webhook успешно установлен: {url}")
-        return "Webhook установлен успешно! ✅ Теперь бот полностью работает."
-    except Exception as e:
-        logger.error(f"Ошибка установки webhook: {e}")
-        return f"Ошибка: {str(e)}"
 @app.route("/set-webhook")
 def set_webhook():
-    future = asyncio.run_coroutine_threadsafe(_set_webhook_async(), loop)
+    url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     try:
-        return future.result()
+        success = application.bot.set_webhook(url=url)
+        if success:
+            logger.info(f"Webhook установлен: {url}")
+            return "Webhook установлен успешно! ✅"
+        else:
+            return "Ошибка установки webhook"
     except Exception as e:
+        logger.error(f"Ошибка: {e}")
         return f"Ошибка: {str(e)}"
+
 # Главная страница
 @app.route("/")
 def index():
     return """
     <h2 style="color: #0088cc;">🏂 SkiCalendarBot — всё готово!</h2>
     <p>Бот работает на Render.com и отвечает на сообщения.</p>
-    <p>После обновления кода нажми кнопку один раз:</p>
+    <p>После деплоя/обновления нажми кнопку один раз:</p>
     <a href="/set-webhook">
         <button style="font-size:20px; padding:15px 30px; background:#00aa00; color:white; border:none; border-radius:10px; cursor:pointer;">
             Установить webhook
         </button>
     </a>
     <hr>
-    <p>Готово? Пиши боту @skicalendar_bot команду /start 🚀</p>
+    <p>Готово? Пиши боту команду /start 🚀</p>
     """
+
 if __name__ == "__main__":
     # Для локального теста
     app.run(host="0.0.0.0", port=5000)
