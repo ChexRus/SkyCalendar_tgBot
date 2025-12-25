@@ -201,17 +201,14 @@ def webhook():
 @app.route("/set-webhook")
 def set_webhook():
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(application.bot.set_webhook(url=url))
+        # Используем asyncio.run() — безопасно и корректно в Python 3.13
+        asyncio.run(application.bot.set_webhook(url=url))
         logger.info(f"Webhook установлен: {url}")
-        return "Webhook установлен успешно! ✅ Теперь бот работает."
+        return "Webhook установлен успешно! ✅ Теперь бот полностью работает."
     except Exception as e:
         logger.error(f"Ошибка установки webhook: {e}")
         return f"Ошибка: {str(e)}"
-    finally:
-        loop.close()
 
 @app.route("/")
 def index():
