@@ -205,12 +205,42 @@ async def set_webhook():
     await application.bot.set_webhook(url=url)
     logger.info(f"Webhook установлен: {url}")
 
+# Специальная функция для Render, чтобы запустить асинхронный код при старте
+def post_fork(server, worker):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(set_webhook())
+    loop.close()
+
+# Применяем хук Gunicorn
+from gunicorn.app.base import BaseApplication
+
+class StandaloneApplication(BaseApplication):
+    def __init__(self, app, options=None):
+        self.options = options or {}
+        self.application = app
+        super().__init__()
+
+    def load_config(self):
+        for key, value in self.options.items():
+            if key in self.cfg.settings and value is not None:
+                self.cfg.set(key.lower(), value)
+
+    def load(self):
+        return self.application
+
 if __name__ == "__main__":
     # Для локального теста
     import asyncio
     asyncio.run(set_webhook())
-    app.run(port=5000)
+    app.run(host="0.0.0.0", port=5000)
 else:
-    # На Render — запускаем при старте сервиса
-    import asyncio
-    asyncio.create_task(set_webhook())
+    # На Render — запускаем через Gunicorn с правильным хуком
+    import multiprocessing
+    options = {
+        "bind": f"0.0.0.0:{os.environ.get('PORT', 10000)}",
+        "workers": 1,
+        "post_fork": post_fork,
+    }
+    StandaloneApplication(app, options).run()
