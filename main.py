@@ -4,7 +4,8 @@ from telebot import types
 from flask import Flask, request, abort
 import requests
 from datetime import datetime, date, timedelta
-import psycopg2
+import psycopg  # Новый импорт Psycopg 3
+from psycopg.rows import dict_row  # Для удобного получения строк как словарей
 
 # === Настройки из Environment Variables Render ===
 BOT_TOKEN = os.environ['BOT_TOKEN']
@@ -14,9 +15,9 @@ DATABASE_URL = os.environ['DATABASE_URL']
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# === Подключение к БД ===
+# === Подключение к БД (Psycopg 3 стиль) ===
 def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)  # dict_row для удобства
     return conn
 
 # === Инициализация таблиц ===
@@ -43,9 +44,9 @@ def init_db():
     cur.close()
     conn.close()
 
-init_db()  # Создаём таблицы при запуске
+init_db()
 
-# === Клавиатуры ===
+# === Клавиатуры (без изменений) ===
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("Отметить сегодняшнюю пробежку")
@@ -60,7 +61,7 @@ def time_menu():
     markup.row("16-20", "21-24")
     return markup
 
-# === Погода ===
+# === Погода (без изменений) ===
 def get_weather(lat, lon):
     url = "https://api.openweathermap.org/data/2.5/weather"
     params = {
@@ -82,7 +83,7 @@ def get_weather(lat, lon):
     except:
         return "Ошибка связи с погодой"
 
-# === Обработчики ===
+# === Обработчики (с небольшими адаптациями под Psycopg 3) ===
 @bot.message_handler(commands=['start'])
 def start(message):
     conn = get_db_connection()
@@ -114,12 +115,16 @@ def save_location(message):
     cur.execute("""
         INSERT INTO users (telegram_id, location) 
         VALUES (%s, %s) 
-        ON CONFLICT (telegram_id) DO UPDATE SET location = %s
-    """, (message.from_user.id, location, location))
+        ON CONFLICT (telegram_id) DO UPDATE SET location = EXCLUDED.location
+    """, (message.from_user.id, location))
     conn.commit()
     conn.close()
 
     bot.send_message(message.chat.id, "Локация сохранена! Теперь можно отмечать пробежки 🎿", reply_markup=main_menu())
+
+# Остальные обработчики (run_today, run_other, process_other_date, process_run_date, process_time, 
+# process_distance, save_run, show_stats, change_loc) остаются почти без изменений.
+# Я внёс только мелкие правки в запросы к БД (используем dict_row, так что fetchone()/fetchall() возвращают словари).
 
 @bot.message_handler(func=lambda m: m.text == "Отметить сегодняшнюю пробежку")
 def run_today(message):
@@ -127,7 +132,7 @@ def run_today(message):
 
 @bot.message_handler(func=lambda m: m.text == "Указать другую дату пробежки")
 def run_other(message):
-    msg = bot.send_message(message.chat.id, "Введите дату в формате ГГГГ-ММ-ДД (например: 2025-12-24)")
+    msg = bot.send_message(message.chat.id, "Введите дату в формате ГГГГ-ММ-ДД (например: 2025-12-25)")
     bot.register_next_step_handler(msg, process_other_date)
 
 def process_other_date(message):
@@ -169,8 +174,8 @@ def save_run(message, run_date, time_range, distance):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT location FROM users WHERE telegram_id = %s", (message.from_user.id,))
-    loc = cur.fetchone()[0]
-    lat, lon = loc.split(',')
+    loc_row = cur.fetchone()
+    lat, lon = loc_row['location'].split(',')
     weather = get_weather(lat, lon) if run_date == date.today() else "История недоступна"
 
     cur.execute("""
@@ -205,9 +210,9 @@ def show_stats(message):
         bot.send_message(message.chat.id, "Нет записей. Отметь первую пробежку!", reply_markup=main_menu())
         return
 
-    total = sum(r[1] for r in runs)
-    week = sum(r[1] for r in runs if r[0] >= date.today() - timedelta(days=7))
-    month = sum(r[1] for r in runs if r[0] >= date.today() - timedelta(days=30))
+    total = sum(r['distance'] for r in runs)
+    week = sum(r['distance'] for r in runs if r['run_date'] >= date.today() - timedelta(days=7))
+    month = sum(r['distance'] for r in runs if r['run_date'] >= date.today() - timedelta(days=30))
 
     text = f"📊 Статистика:\n\n"
     text += f"За неделю: {week:.1f} км\n"
@@ -216,8 +221,8 @@ def show_stats(message):
     text += "Последние пробежки:\n"
 
     for r in runs[:15]:
-        comment = f" | {r[3]}" if r[3] else ""
-        text += f"• {r[0]} — {r[1]} км ({r[2]}){comment}\n"
+        comment = f" | {r['comment']}" if r['comment'] else ""
+        text += f"• {r['run_date']} — {r['distance']} км ({r['time_range']}){comment}\n"
 
     bot.send_message(message.chat.id, text, reply_markup=main_menu())
 
@@ -226,7 +231,7 @@ def change_loc(message):
     bot.send_message(message.chat.id, "Отправь новую локацию 📍", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(message, save_location)
 
-# === Webhook ===
+# === Webhook (без изменений) ===
 @app.route('/', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'POST':
@@ -239,16 +244,11 @@ def webhook():
     else:
         return "Бот работает! 🎿"
 
-# === Запуск на Render ===
 if __name__ == '__main__':
     import time
     bot.remove_webhook()
     time.sleep(1)
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/"
     bot.set_webhook(url=webhook_url)
-    # Render использует gunicorn
-    # Но если запуск вручную — порт
     port = int(os.environ.get('PORT', 5000))
-    from gunicorn.app.wsgiapp import run
-    # В реальности Render запускает через gunicorn автоматически
     app.run(host='0.0.0.0', port=port)
