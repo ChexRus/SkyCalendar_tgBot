@@ -26,13 +26,13 @@ from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 # Состояния диалога
 SELECT_DATE, INPUT_KM, SELECT_TIME = range(3)
 
-# Хранение данных в памяти (пока)
+# Хранение данных в памяти
 user_data_storage = defaultdict(list)  # user_id -> list[dict]
 user_locations = {}  # user_id -> (lat, lon)
 
 app = Flask(__name__)
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -191,7 +191,23 @@ application.add_handler(MessageHandler(filters.LOCATION, location_handler))
 application.add_handler(conv_handler)
 
 # ======================
-# Flask роуты
+# Инициализация Application (обязательно для новых версий PTB)
+# ======================
+
+async def init_app():
+    await application.initialize()
+    await application.start()
+    logger.info("Application initialized and started successfully")
+
+# Запуск инициализации при загрузке модуля
+import asyncio
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(init_app())
+loop.close()
+
+# ======================
+# Flask роуты (все синхронные — совместимы с Gunicorn)
 # ======================
 
 @app.route(f"/{os.environ['BOT_TOKEN']}", methods=["POST"])
@@ -200,59 +216,53 @@ def webhook():
         abort(403)
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, application.bot)
-    
-    import asyncio
-    loop = asyncio.get_event_loop_policy().new_event_loop()
+
+    # Обработка обновления в отдельном event loop
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(application.process_update(update))
     finally:
-        pass  # не закрываем loop
+        loop.close()
     return "OK", 200
 
-# Внутренняя асинхронная функция установки webhook
+# Установка webhook вручную
 async def _set_webhook_async():
     url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/{os.environ['BOT_TOKEN']}"
     try:
         await application.bot.set_webhook(url=url)
         logger.info(f"Webhook успешно установлен: {url}")
-        return "Webhook установлен успешно! ✅ Теперь бот получает сообщения."
+        return "Webhook установлен успешно! ✅ Теперь бот полностью работает."
     except Exception as e:
         logger.error(f"Ошибка установки webhook: {e}")
         return f"Ошибка: {str(e)}"
 
-# Ручная установка webhook (синхронный роут — работает с Gunicorn)
 @app.route("/set-webhook")
 def set_webhook():
-    import asyncio
-    loop = asyncio.get_event_loop_policy().new_event_loop()
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(_set_webhook_async())
     finally:
-        # Не закрываем loop — это важно!
-        pass
+        loop.close()
     return result
 
 # Главная страница
 @app.route("/")
 def index():
     return """
-    <h2 style="color: #0088cc;">🏂 SkiCalendarBot работает!</h2>
-    <p>Бот успешно запущен на Render.com</p>
-    <p><strong>После каждого обновления кода</strong> нужно один раз нажать кнопку ниже:</p>
+    <h2 style="color: #0088cc;">🏂 SkiCalendarBot — всё готово!</h2>
+    <p>Бот работает на Render.com и отвечает на сообщения.</p>
+    <p>После обновления кода нажми кнопку один раз:</p>
     <a href="/set-webhook">
         <button style="font-size:20px; padding:15px 30px; background:#00aa00; color:white; border:none; border-radius:10px; cursor:pointer;">
-            Установить webhook сейчас
+            Установить webhook
         </button>
     </a>
     <hr>
-    <p>После нажатия бот начнёт отвечать на сообщения в Telegram.</p>
-    <p>Ты молодец — бот готов к использованию! 🚀</p>
+    <p>Готово? Пиши боту @skicalendar_bot команду /start 🚀</p>
     """
 
 if __name__ == "__main__":
     # Для локального теста
-    import asyncio
-    asyncio.run(_set_webhook_async())
     app.run(host="0.0.0.0", port=5000)
