@@ -4,10 +4,10 @@ from telebot import types
 from flask import Flask, request, abort
 import requests
 from datetime import datetime, date, timedelta
-import psycopg  # Новый импорт Psycopg 3
-from psycopg.rows import dict_row  # Для удобного получения строк как словарей
+import psycopg
+from psycopg.rows import dict_row
 
-# === Настройки из Environment Variables Render ===
+# === Настройки из Environment Variables на Render ===
 BOT_TOKEN = os.environ['BOT_TOKEN']
 WEATHER_API_KEY = os.environ['WEATHER_API_KEY']
 DATABASE_URL = os.environ['DATABASE_URL']
@@ -15,10 +15,9 @@ DATABASE_URL = os.environ['DATABASE_URL']
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# === Подключение к БД (Psycopg 3 стиль) ===
+# === Подключение к БД ===
 def get_db_connection():
-    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)  # dict_row для удобства
-    return conn
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 # === Инициализация таблиц ===
 def init_db():
@@ -46,7 +45,7 @@ def init_db():
 
 init_db()
 
-# === Клавиатуры (без изменений) ===
+# === Клавиатуры ===
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("Отметить сегодняшнюю пробежку")
@@ -61,7 +60,7 @@ def time_menu():
     markup.row("16-20", "21-24")
     return markup
 
-# === Погода (без изменений) ===
+# === Погода ===
 def get_weather(lat, lon):
     url = "https://api.openweathermap.org/data/2.5/weather"
     params = {
@@ -81,9 +80,9 @@ def get_weather(lat, lon):
         else:
             return "Не удалось получить погоду"
     except:
-        return "Ошибка связи с погодой"
+        return "Ошибка связи с сервисом погоды"
 
-# === Обработчики (с небольшими адаптациями под Psycopg 3) ===
+# === Обработчики бота ===
 @bot.message_handler(commands=['start'])
 def start(message):
     conn = get_db_connection()
@@ -95,21 +94,21 @@ def start(message):
     if user:
         bot.send_message(message.chat.id, "С возвращением, лыжник! ❄️🏃‍♂️\nЧто будем делать?", reply_markup=main_menu())
     else:
-        bot.send_message(message.chat.id, 
-                         "Привет! Это бот для учёта лыжных (и беговых) тренировок.\n\n"
-                         "Чтобы я показывал погоду в день пробежки — поделись своей локацией 📍\n"
-                         "(нажми на скрепку 📎 → Локация)", 
+        bot.send_message(message.chat.id,
+                         "Привет! Это бот-календарь лыжных и беговых тренировок 🎿\n\n"
+                         "Чтобы показывать погоду в день пробежки — поделись своей локацией 📍\n"
+                         "(скрепка 📎 → Локация)",
                          reply_markup=types.ReplyKeyboardRemove())
         bot.register_next_step_handler(message, save_location)
 
 def save_location(message):
     if not message.location:
-        bot.send_message(message.chat.id, "Пожалуйста, отправь локацию через кнопку 📎 → Локация")
+        bot.send_message(message.chat.id, "Пожалуйста, отправь локацию через скрепку 📎 → Локация")
         bot.register_next_step_handler(message, save_location)
         return
 
     location = f"{message.location.latitude},{message.location.longitude}"
-    
+
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -120,11 +119,7 @@ def save_location(message):
     conn.commit()
     conn.close()
 
-    bot.send_message(message.chat.id, "Локация сохранена! Теперь можно отмечать пробежки 🎿", reply_markup=main_menu())
-
-# Остальные обработчики (run_today, run_other, process_other_date, process_run_date, process_time, 
-# process_distance, save_run, show_stats, change_loc) остаются почти без изменений.
-# Я внёс только мелкие правки в запросы к БД (используем dict_row, так что fetchone()/fetchall() возвращают словари).
+    bot.send_message(message.chat.id, "Локация сохранена! Теперь можно отмечать пробежки 🎉", reply_markup=main_menu())
 
 @bot.message_handler(func=lambda m: m.text == "Отметить сегодняшнюю пробежку")
 def run_today(message):
@@ -132,27 +127,26 @@ def run_today(message):
 
 @bot.message_handler(func=lambda m: m.text == "Указать другую дату пробежки")
 def run_other(message):
-    msg = bot.send_message(message.chat.id, "Введите дату в формате ГГГГ-ММ-ДД (например: 2025-12-25)")
+    msg = bot.send_message(message.chat.id, "Введите дату пробежки в формате ГГГГ-ММ-ДД (например: 2025-12-25)")
     bot.register_next_step_handler(msg, process_other_date)
 
 def process_other_date(message):
     try:
         run_date = datetime.strptime(message.text.strip(), "%Y-%m-%d").date()
         process_run_date(message, run_date)
-    except:
-        msg = bot.send_message(message.chat.id, "Неверный формат. Попробуй ещё: ГГГГ-ММ-ДД")
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "Неверный формат даты. Попробуй ещё раз: ГГГГ-ММ-ДД")
         bot.register_next_step_handler(msg, process_other_date)
 
 def process_run_date(message, run_date):
-    msg = bot.send_message(message.chat.id, f"Пробежка {run_date}\nВ какое время?", reply_markup=time_menu())
+    msg = bot.send_message(message.chat.id, f"Пробежка {run_date}\nВ какое время была тренировка?", reply_markup=time_menu())
     bot.register_next_step_handler(msg, lambda m: process_time(m, run_date))
 
 def process_time(message, run_date):
     if message.text not in ["6-10", "11-15", "16-20", "21-24"]:
-        msg = bot.send_message(message.chat.id, "Выбери из кнопок:", reply_markup=time_menu())
+        msg = bot.send_message(message.chat.id, "Пожалуйста, выбери время из кнопок ниже:", reply_markup=time_menu())
         bot.register_next_step_handler(msg, lambda m: process_time(m, run_date))
         return
-    
     bot.register_next_step_handler(message, lambda m: process_distance(m, run_date, message.text))
 
 def process_distance(message, run_date, time_range):
@@ -160,23 +154,23 @@ def process_distance(message, run_date, time_range):
         distance = float(message.text.replace(',', '.'))
         if distance <= 0:
             raise ValueError
-    except:
-        msg = bot.send_message(message.chat.id, "Введи положительное число километров (например: 15 или 8.5)")
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "Введи положительное число километров (например: 10 или 12.5)")
         bot.register_next_step_handler(msg, lambda m: process_distance(m, run_date, time_range))
         return
 
-    msg = bot.send_message(message.chat.id, "Комментарий к пробежке? (или напиши /skip)")
+    msg = bot.send_message(message.chat.id, "Добавь комментарий к пробежке (или напиши /skip):")
     bot.register_next_step_handler(msg, lambda m: save_run(m, run_date, time_range, distance))
 
 def save_run(message, run_date, time_range, distance):
-    comment = message.text if message.text != "/skip" else None
+    comment = message.text if message.text.lower() != "/skip" else None
 
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT location FROM users WHERE telegram_id = %s", (message.from_user.id,))
     loc_row = cur.fetchone()
     lat, lon = loc_row['location'].split(',')
-    weather = get_weather(lat, lon) if run_date == date.today() else "История недоступна"
+    weather = get_weather(lat, lon) if run_date == date.today() else "Историческая погода недоступна"
 
     cur.execute("""
         INSERT INTO runs (telegram_id, run_date, time_range, distance, comment)
@@ -207,22 +201,22 @@ def show_stats(message):
     conn.close()
 
     if not runs:
-        bot.send_message(message.chat.id, "Нет записей. Отметь первую пробежку!", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "Пока нет записей о пробежках. Отметь первую!", reply_markup=main_menu())
         return
 
     total = sum(r['distance'] for r in runs)
     week = sum(r['distance'] for r in runs if r['run_date'] >= date.today() - timedelta(days=7))
     month = sum(r['distance'] for r in runs if r['run_date'] >= date.today() - timedelta(days=30))
 
-    text = f"📊 Статистика:\n\n"
+    text = f"📊 Твоя статистика:\n\n"
     text += f"За неделю: {week:.1f} км\n"
     text += f"За месяц: {month:.1f} км\n"
     text += f"Всего: {total:.1f} км\n\n"
     text += "Последние пробежки:\n"
 
     for r in runs[:15]:
-        comment = f" | {r['comment']}" if r['comment'] else ""
-        text += f"• {r['run_date']} — {r['distance']} км ({r['time_range']}){comment}\n"
+        comment_part = f" | {r['comment']}" if r['comment'] else ""
+        text += f"• {r['run_date']} — {r['distance']} км ({r['time_range']}){comment_part}\n"
 
     bot.send_message(message.chat.id, text, reply_markup=main_menu())
 
@@ -231,8 +225,9 @@ def change_loc(message):
     bot.send_message(message.chat.id, "Отправь новую локацию 📍", reply_markup=types.ReplyKeyboardRemove())
     bot.register_next_step_handler(message, save_location)
 
-# === Webhook (без изменений) ===
+# === Webhook — обрабатываем и корень, и путь с токеном ===
 @app.route('/', methods=['GET', 'POST'])
+@app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
     if request.method == 'POST':
         if request.headers.get('content-type') == 'application/json':
@@ -242,13 +237,16 @@ def webhook():
         else:
             abort(403)
     else:
-        return "Бот работает! 🎿"
+        return "Бот работает! 🎿", 200
 
+# === Запуск на Render ===
 if __name__ == '__main__':
     import time
     bot.remove_webhook()
-    time.sleep(1)
+    time.sleep(2)
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/"
     bot.set_webhook(url=webhook_url)
-    port = int(os.environ.get('PORT', 5000))
+    print(f"Webhook успешно установлен на: {webhook_url}")
+
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
